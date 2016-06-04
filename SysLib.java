@@ -5,10 +5,10 @@
 // ------------------------------------------------------------------------ //
 import java.util.*;
 
-public class SysLib {
+public class SysLib 
+{
 
-	// ////////////////8 SysLib File System functions////////////////////
-
+	// ------ Start Implemented File System functions ---------------------- //
 	public static int format(int files) {
 		return Kernel.interrupt(Kernel.INTERRUPT_SOFTWARE, Kernel.FORMAT,
 				files, null);
@@ -54,8 +54,7 @@ public class SysLib {
 		return Kernel.interrupt(Kernel.INTERRUPT_SOFTWARE, Kernel.SIZE, fd,
 				null);
 	}
-
-	// ////////////////////////////////////////////////////////////////////
+    // ------ END ---------------------------------------------------------- //
 
 	public static int exec(String args[]) {
 		return Kernel
