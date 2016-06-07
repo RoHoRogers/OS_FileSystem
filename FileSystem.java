@@ -11,8 +11,7 @@ public class FileSystem
 	private SuperBlock superblock;
 	private Directory directory;
 	private FileTable filetable;
-	public final int ERROR = -1;
-	public final int OK = 0;
+
 	public final int SEEK_SET = 0;
 	public final int SEEK_CUR = 1;
 	public final int SEEK_END = 2;
@@ -22,21 +21,21 @@ public class FileSystem
 	// --------------------------------------------------------------------- //
 	public FileSystem(int blocks) 
 	{
-		byte[] dirData;
+
 		superblock = new SuperBlock(blocks);
 		directory = new Directory(superblock.totalInodes);
 		filetable = new FileTable(directory);
-		// read the "/" file from disk
-		FileTableEntry dirEnt = open("/", "r");
-		int dirSize = fsize(dirEnt);
-		if (dirSize > 0) 
+
+		FileTableEntry directoryEnt = open("/", "r");
+		int size = fsize(directoryEnt);
+		
+		if (size > 0)  // Does the directory have data?
 		{
-			// the directory has some data
-			dirData = new byte[dirSize];
-			read(dirEnt, dirData);
+			byte[] dirData = new byte[size];     
+			read(directoryEnt, dirData);
 			directory.bytes2directory(dirData);
 		}
-		close(dirEnt);
+		close(directoryEnt);
 	}
 
 	// ------------------------ sync --------------------------------------- //
@@ -45,28 +44,22 @@ public class FileSystem
 	public void sync() 
 	{
 		// write the "/" file from disk
-		FileTableEntry dirEnt = open("/", "w");
+		FileTableEntry root = open("/", "w");
 		// get directory data in bytes
 		byte[] dirData = directory.directory2bytes();
 		// write the file table entry
-		write(dirEnt, dirData);
-		close(dirEnt);
+		write(root, dirData);
+		close(root);
 		// tell super block to write to the disk
 		superblock.sync();
 	}
 
 	// ------------------------ format ------------------------------------- //
-	// 
+	// The parameter "files" specifies the number of files to be created
+	// (the number of inodes to be allocated) in the file system.  
 	// --------------------------------------------------------------------- //
 	public boolean format(int files) 
 	{
-		// file table contents must be closed
-		if (!filetable.fempty()) 
-		{
-			// TODO: omit or wait with while loop if this causes errors
-			Kernel.report("Format failure: Cannot format superblock while file are in use");
-			return false;
-		}
 		superblock.format(files);
 		directory = new Directory(superblock.totalInodes);
 		filetable = new FileTable(directory);
@@ -76,37 +69,18 @@ public class FileSystem
 	// ------------------------ open --------------------------------------- //
 	// 
 	// --------------------------------------------------------------------- //
-	public FileTableEntry open(String filename, String mode) {
-		FileTableEntry fte;
-		Inode iNode;
-		// must provide valid filename and mode
-		if (filename == "" || mode == "")
-		{
-			return null;
-		}
-		
-		
-		// if file table entry is null or mode is invalid
-		// or iNode is null or iNode flag is 'to be deleted'
-		if ((fte = filetable.falloc(filename, mode)) == null || fte.mode == -1
-				|| (iNode = fte.iNode) == null || iNode.flag == Inode.DELETE) 
-		{ 
-				filetable.ffree(fte); // relieve entry from memory
-				return null;
-		}
-		
-		synchronized (fte) 
-		{
-			// if mode is "w" delete all blocks and write from scratch
-			if (fte.mode == FileTableEntry.WRITEONLY && !deallocateBlocks(fte)) 
-			{
-				// on failure, relieve entry from memory
-				filetable.ffree(fte);
-				Kernel.report("Open failure: Could not deallocate all blocks");
-				return null;
-			}
-		}
-		return fte;
+	public FileTableEntry open(String filename, String mode) 
+	{
+		FileTableEntry fte = filetable.falloc(filename, mode);
+		if (mode == "w")
+    	{
+    		// if so, make sure all blocks are unallocated
+    		if ( !deallocAllBlocks( fte ))
+    		{
+    			return null;
+    		}
+    	}
+    	return fte;
 	}
 
 	// Commits all file transactions on this file,
@@ -117,35 +91,17 @@ public class FileSystem
 	// --------------------------------------------------------------------- //
 	public boolean close(FileTableEntry fte) 
 	{
-		Inode iNode;
-		if (fte == null)
+		synchronized(fte) 
 		{
-			return false;
-		}
+			// decrease the number of users
+			fte.count--;
 
-		synchronized (fte) 
-		{
-			if ((iNode = fte.iNode) == null)
+			if (fte.count == 0) 
 			{
-				return false;
+				return filetable.ffree(fte);
 			}
-			if (iNode.flag == Inode.DELETE && fte.count == 0) 
-			{
-				// deallocate file table entry if no more threads are using the
-				// file and it has been marked as deleted (could be due to a bad
-				// write)
-				deallocateBlocks(fte);
-				if (!directory.ifree(fte.iNumber))
-				{
-					return false;
-				}
-			}
-			if (!filetable.ffree(fte))
-			{
-				return false;
-			}
+			return true;
 		}
-		return true;
 	}
 
 	// ------------------------ fsize -------------------------------------- //
@@ -153,19 +109,14 @@ public class FileSystem
 	// --------------------------------------------------------------------- //
 	public int fsize(FileTableEntry fte) 
 	{
-		Inode iNode;
-		// return -1 if fte is null
-		if (fte == null)
-		{
-			return ERROR;
-		}
-		// return -1 if iNode is null
-		if ((iNode = fte.iNode) == null)
-		{
-			return ERROR;
-		}
-		// return iNode.length (already in bytes, no need for conversion)
-		return iNode.length;
+		  //cast the entry as synchronized
+    	synchronized(fte)
+    	{
+	        // Set a new Inode object to the entries Inode
+			Inode inode = fte.inode;
+	        // return the length on the new Inode object
+    		return inode.length;
+    	}
 	}
 
 	// ------------------------ read --------------------------------------- //
@@ -173,82 +124,62 @@ public class FileSystem
 	// --------------------------------------------------------------------- //
 	public int read(FileTableEntry fte, byte[] buffer) 
 	{
-		int seekPtr, length, block, offset, available, remaining, rLength, index;
-		Inode iNode;
-		byte[] data;
-		// file table entry cannot be null
-		if (fte == null)
+    	//entry is index of file in process open-file table
+    	//this accesses system wide open file table
+    	//data blocks accessed, file control block returned
+    	
+        //check write or append status
+		if ((fte.mode == "w") || (fte.mode == "a"))
 		{
-			return ERROR;
+			return -1;
 		}
-		// mode must be read
-		if (fte.mode == FileTableEntry.WRITEONLY || fte.mode == FileTableEntry.APPEND)
-		{
-			return ERROR;
-		}
-		// iNode cannot be null
-		if ((iNode = fte.iNode) == null)
-		{
-			return ERROR;
-		}
-		// read up to buffer length
-		length = buffer.length;
 
-		// multiple threads cannot read at the same time
-		synchronized (fte) 
-		{
-			// start at position pointed to by iNode's seek pointer
-			seekPtr = fte.seekPtr;
-			data = new byte[Disk.blockSize];
-			index = 0;
-			while (index < length) 
-			{
-				// byte offset-- 0 is a new block
-				offset = seekPtr % Disk.blockSize;
-				// bytes available
-				available = Disk.blockSize - offset;
-				// bytes remaining
-				remaining = length - index;
-				// bytes to read-- cannot be greater than available
-				rLength = Math.min(available, remaining);
+        int size  = buffer.length;   //set total size of data to read
+        int readBuf = 0;            //track data read
+        int rError = -1;            //track error on read
+        int blockSize = 512;        //set block size
+        int bytes = 0;            //track how much is left to read
 
-				// block must exist
-				if ((block = iNode.findTargetBlock(offset)) == ERROR) 
+        //cast the fte as synchronized
+        //loop to read chunks of data
+        
+        synchronized(fte)
+        {
+        	while (fte.seekPtr < fsize(fte) && (size > 0))
+        	{
+        		int currentBlock = fte.inode.findBlock(fte.seekPtr);
+        		if (currentBlock == rError)
+        		{
+        			break;
+        		}
+				byte[] data = new byte[blockSize];
+        		SysLib.rawread(currentBlock, data);
+        		
+        		int dataOffset = fte.seekPtr % blockSize;
+        		int blocksLeft = blockSize - bytes;
+        		int fileLeft = fsize(fte) - fte.seekPtr;
+        		
+        		if (blocksLeft < fileLeft)
 				{
-					// if ((block = iNode.findTargetBlock(seekPtr)) == ERROR) {
-					Kernel.report("Read failure: Failed to find target block "
-							+ seekPtr + "\n");
-					return ERROR;
+					bytes = blocksLeft;
+				}
+				else
+				{
+					bytes = fileLeft;
 				}
 
-				if (block < 0 || block >= superblock.totalBlocks) 
+				if (bytes > size)
 				{
-					Kernel.report("Read error: Block " + block
-							+ " out of range\n");
-					break;
-					// return ERROR;
+					bytes = size;
 				}
 
-				if (offset == 0) 
-				{
-					data = new byte[Disk.blockSize];
-				}
-
-				// read block from disk to data
-				SysLib.rawread(block, data);
-
-				// copy data to buffer
-				// source, source position, destination, destination position,
-				// length to copy
-				System.arraycopy(data, offset, buffer, index, rLength);
-
-				index += rLength;
-				seekPtr += rLength;
-			}
-			// set new seek pointer
-			seek(fte, index, SEEK_CUR);
-		}
-		return index;
+        		System.arraycopy(data, dataOffset, buffer, readBuf, bytes);
+        		readBuf += bytes;
+        		fte.seekPtr += bytes;
+        		size -= bytes;
+        	}
+        	return readBuf;
+        }
 	}
 
 
@@ -266,163 +197,104 @@ public class FileSystem
 	// --------------------------------------------------------------------- //
 	public int write(FileTableEntry fte, byte[] buffer) 
 	{
-		int seekPtr, length, offset, remaining, available, wLength, index;
-		short block;
-		Inode iNode;
-		byte[] data;
-		// file table entry cannot be null
-		if (fte == null)
-		{
-			return ERROR;
-		}		
-		// mode cannot be read only
-		if (fte.mode == FileTableEntry.READONLY)
-		{
-			return ERROR;
-		}
-		// iNode cannot be null
-		if ((iNode = fte.iNode) == null)
-		{
-			return ERROR;
-		}
-		// iNode must not be in use
-		if (iNode.flag == Inode.READ || iNode.flag == Inode.WRITE || iNode.flag == Inode.DELETE)
-		{
-			return ERROR;
-		}
-		
-		// write up to buffer length
-		length = buffer.length;
-		// on error, set iNode flag to "to be deleted" because it's probably
-		// garbage now
-		// multiple threads cannot write at the same time
-		synchronized (fte) 
-		{
-			// start at position pointed to by inode's seek pointer
-			// append should set seek pointer to EOF
-			seekPtr = fte.mode == FileTableEntry.APPEND
-					? seek(fte, 0, SEEK_END)
-					: fte.seekPtr;
-			iNode.flag = Inode.WRITE; // set flag to write
-			index = 0;
-			data = new byte[Disk.blockSize];
-			while (index < length) 
-			{
-				// byte offset-- 0 is a new block
-				offset = seekPtr % Disk.blockSize;
-				// bytes available
-				available = Disk.blockSize - offset;
-				// bytes remaining
-				remaining = length - index;
-				// bytes to write-- cannot be greater than available
-				wLength = Math.min(available, remaining);
+		int bytesWritten = 0;
+		int bufferSize = buffer.length;
+		int blockSize = 512;
 
-				// get next block from iNode
-				if ((block = iNode.findTargetBlock(offset)) == ERROR) 
+		if (fte == null || fte.mode == "r")
+		{
+			return -1;
+		}
+
+		synchronized (fte)
+		{
+			while (bufferSize > 0)
+			{
+				int location = fte.inode.findBlock(fte.seekPtr);
+				if (location == -1)  // if block unblemished
 				{
-					// if ERROR, file is out of memory, so get a new block
-					if ((block = superblock.getFreeBlock()) == ERROR) 
+					short newLocation = (short) superblock.getFreeBlock();
+					int testPtr = fte.inode.getBlock(fte.seekPtr, newLocation);
+
+					if (testPtr == -3)
 					{
-						Kernel.report("Write failure: Out of memory!");
-						iNode.flag = Inode.DELETE;
-						break;
-						// return ERROR; // no more free blocks
+						short freeBlock = (short) this.superblock.getFreeBlock();
+
+						// indirect pointer is empty
+						if (!fte.inode.setBlock(freeBlock))
+						{
+							return -1;
+						}
+
+						// check block pointer error
+						if (fte.inode.getBlock(fte.seekPtr, newLocation) != 0)
+						{
+							return -1;
+						}
+
 					}
-					// read the file to the block
-					if (iNode.setTargetBlock(seekPtr, block) == ERROR) 
+					else if (testPtr == -2 || testPtr == -1)
 					{
-						// out of bounds, try to get a new indirect block
-						if (iNode.setIndexBlock(block) == false) 
-						{
-							Kernel.report("Write failure: Failed to set index block "
-									+ block);
-							iNode.flag = Inode.DELETE;
-							break;
-							// return ERROR;
-						}
-						// index block set, get a new block
-						if ((block = superblock.getFreeBlock()) == ERROR) 
-						{
-							Kernel.report("Write failure: Out of memory!");
-							iNode.flag = Inode.DELETE;
-							break;
-							// return ERROR; // no more free blocks
-						}
-						if (iNode.setTargetBlock(seekPtr, block) == ERROR) 
-						{
-							Kernel.report("Write failure: Failed to set target block "
-									+ block);
-							iNode.flag = Inode.DELETE;
-							break;
-							// return ERROR;
-						}
+						return -1;
 					}
+
+					location = newLocation;
 				}
 
-				if (block >= superblock.totalBlocks) 
+				byte [] tempBuff = new byte[blockSize];
+				SysLib.rawread(location, tempBuff);
+
+				int tempPtr = fte.seekPtr % blockSize;
+				int diff = blockSize - tempPtr;
+
+				if (diff > bufferSize)
 				{
-					Kernel.report("Write failure: Block" + block
-							+ " out of range");
-					iNode.flag = Inode.DELETE;
-					break;
-				}
+					System.arraycopy(buffer, bytesWritten, tempBuff, tempPtr, bufferSize);
+					SysLib.rawwrite(location, tempBuff);
 
-				if (offset == 0) 
+					fte.seekPtr += bufferSize;
+					bytesWritten += bufferSize;
+					bufferSize = 0;
+				}
+				else 
 				{
-					data = new byte[Disk.blockSize];
+					System.arraycopy(buffer, bytesWritten, tempBuff, tempPtr, diff);
+					SysLib.rawwrite(location, tempBuff);
+
+					fte.seekPtr += diff;
+					bytesWritten += diff;
+					bufferSize -= diff;
 				}
-
-				SysLib.rawread(block, data);
-
-				// copy data to buffer
-				// source, source position, destination, destination position,
-				// length to copy
-				System.arraycopy(buffer, index, data, offset, wLength);
-				// write data to disk
-
-				SysLib.rawwrite(block, data);
-
-				index += wLength;
-				seekPtr += wLength;
 			}
-			// update iNode for append or w+
-			if (seekPtr > iNode.length)
+
+			// update inode length if seekPtr larger
+
+			if (fte.seekPtr > fte.inode.length)
 			{
-				iNode.length = seekPtr;
+				fte.inode.length = fte.seekPtr;
 			}
-			// set new seek pointer
-			seek(fte, index, SEEK_CUR);
-			if (iNode.flag != Inode.DELETE) 
-			{
-				// iNode is now USED
-				iNode.flag = Inode.USED;
-			}
-			// save iNode to disk
-			iNode.toDisk(fte.iNumber);
+			fte.inode.toDisk(fte.iNumber);
+			return bytesWritten;
 		}
-		// if error was not returned, all bytes wrote successfully-- return
-		// length
-		return index;
 	}
 	
 	
 	// ------------------------ delete ------------------------------------- //
 	// 
 	// --------------------------------------------------------------------- //
-	public boolean delete(String fname) 
+	public boolean delete(String file) 
 	{
-		int iNumber;
-		if (fname == "") // if blank file name, return false
+		// pick TCB
+		FileTableEntry tcb = open(file, "w");       
+		if (directory.ifree(tcb.iNumber) && close(tcb)) 
 		{
-			return false;
-		}
-		// get the iNumber for this filename
-		if ((iNumber = directory.namei(fname)) == -1)
+			// Deletion
+			return true;     
+		} 
+		else 
 		{
-			return false; // if it does not exist, return false
+			return false;     
 		}
-		// deallocate file, return success or failure
-		return directory.ifree(iNumber);
 	}
 
 	// ------------------------ seek --------------------------------------- //
@@ -430,119 +302,75 @@ public class FileSystem
 	// --------------------------------------------------------------------- //
 	public int seek(FileTableEntry fte, int offset, int whence) 
 	{
-		// seek pointer, end of file
-		int seekPtr, EOF;
-		if (fte == null)
+		synchronized (fte)
 		{
-			return ERROR;
-		}
-		synchronized (fte) 
-		{
-			seekPtr = fte.seekPtr;
-			EOF = fsize(fte);
-			switch (whence) 
+			switch(whence)
 			{
-				case SEEK_SET :
-					// file's seek pointer is set to offset bytes from the
-					// beginning of the file
-					seekPtr = offset;
+				//beginning of file
+				case SEEK_SET:
+					//set seek pointer to offset of beginning of file
+					fte.seekPtr = offset;
 					break;
-				case SEEK_CUR :
-					// file's seek pointer is set to its current value plus the
-					// offset
-					seekPtr += offset;
+				// current position
+				case SEEK_CUR:
+					fte.seekPtr += offset;
 					break;
-				// file's seek pointer is set to the size of the file plus the
-				// offset
-				case SEEK_END :
-					seekPtr = EOF + offset;
+				// if from end of file
+				case SEEK_END:
+					// set seek pointer to size + offset
+					fte.seekPtr = fte.inode.length + offset;
 					break;
-				default :
-					Kernel.report("Seek error: Whence " + whence
-							+ " is unrecognized");
-					// return ERROR;
-			}
-			// clamp seek pointer to the size of the file
-			// if seek pointer is negative, clamp to 0
-			if (seekPtr < 0)
-			{
-				seekPtr = 0;
-			}
-			// if seek pointer is greater than file size,
-			// clamp to end of file
-			else if (seekPtr > EOF)
-			{
-				seekPtr = EOF;
+				// unsuccessful
+				default:
+					return -1;
 			}
 
-			// set entry's seek pointer
-			fte.seekPtr = seekPtr;
+			if (fte.seekPtr < 0)
+			{
+				fte.seekPtr = 0;
+			}
 
-			// return OK;
+			if (fte.seekPtr > fte.inode.length)
+			{
+				fte.seekPtr = fte.inode.length;
+			}
+
+			return fte.seekPtr;
 		}
-		return seekPtr;
 	}
 
-	// ------------------------ deallocateBlocks --------------------------- //
+	// ------------------------ deallocAllBlocks --------------------------- //
 	// 
 	// --------------------------------------------------------------------- //
-	public boolean deallocateBlocks(FileTableEntry fte) 
+	public boolean deallocAllBlocks(FileTableEntry fte) 
 	{
-		Inode iNode;
-		byte[] data;
-		int block;
-		// return false if fte is null
-		if (fte == null)
+        short invalid = -1;
+    	if (fte.inode.count != 1)
 		{
-			return false;
-		}
-		// return false if iNode is null
-		if ((iNode = fte.iNode) == null)
-		{
-			return false;
-		}
-		// return false if iNode is being used
-		if (iNode.count > 1)
-		{
+			SysLib.cerr("Null Pointer");
 			return false;
 		}
 
-		// deallocate direct blocks
-		/*
-		 * increment index by block size until iNode's length is reached, since
-		 * length is a byte length. could have used iNode.direct.size and
-		 * incremented by 1 through the array, but this would defeat the purpose
-		 * of directSize being a private int-- so instead, we use the built-in
-		 * methods.
-		 */
-		for (int i = 0, l = iNode.length, inc = Disk.blockSize; i < l; i += inc) 
+		for (short blockId = 0; blockId < fte.inode.directSize; blockId++)
 		{
-			// skip unallocated block
-			if ((block = iNode.findTargetBlock(i)) == ERROR)
+			if (fte.inode.direct[blockId] != invalid)
 			{
-				continue;
+				superblock.returnBlock(blockId);
+				fte.inode.direct[blockId] = invalid;
 			}
-			// deallocate block
-			superblock.returnBlock(block);
-			iNode.setTargetBlock(block, (short) -1);
 		}
 
-		// deallocate indirect blocks
-		if ((data = iNode.deleteIndexBlock()) != null) 
+		byte [] data = fte.inode.freeBlock();
+
+		if (data != null)
 		{
-			for (int i = 0, l = Disk.blockSize / 2; i < l; i += 2) 
+			short blockId;
+			while((blockId = SysLib.bytes2short(data, 0)) != invalid)
 			{
-				// skip unallocated block
-				if ((block = SysLib.bytes2short(data, i)) == ERROR)
-				{	
-					continue;
-				}
-				// deallocate block
-				superblock.returnBlock(block);
+				superblock.returnBlock(blockId);
 			}
 		}
-		// write iNode to disk
-		iNode.toDisk(fte.iNumber);
+		fte.inode.toDisk(fte.iNumber);
 		return true;
 	}
 }

@@ -8,136 +8,139 @@ import java.util.Vector;
 
 public class FileTable 
 {
-	private Vector<FileTableEntry> table; // the actual entity of this file
-											// table
-	private Directory dir; // the root directory
+    public final static int UNUSED = 0;
+    public final static int USED = 1;
+    public final static int READ = 2;
+    public final static int WRITE = 3;
+
+    private Vector<FileTableEntry> table;    // the actual entity of this file table
+    private Directory dir;        			 // the root directory
+
 
 	// ------------------------ Constructor -------------------------------- //
-	// 
+	// Builds the beginnings of the FileTableEntry table
 	// --------------------------------------------------------------------- //
-	public FileTable(Directory directory) 
-	{ // constructor
-		table = new Vector<FileTableEntry>(); // instantiate a file (structure)
-												// table
-		dir = directory; // reference to the directory from the file system
-	}
+    public FileTable(Directory directory) 
+	{ 
+        table = new Vector<FileTableEntry>();     // instantiate a file (structure) table
+        dir = directory;           // receive a reference to the Director
+    }                             // from the file system
 
 	// ------------------------ falloc ------------------------------------- //
 	// 
 	// --------------------------------------------------------------------- //
-	public synchronized FileTableEntry falloc(String fname, String m) 
+	public synchronized FileTableEntry falloc(String fileName, String mode) 
 	{
-		short mode = FileTableEntry.getMode(m);
-		short iNumber = -1;
-		Inode iNode = null;
-		FileTableEntry fte;
-		// if mode is invalid, return null
-		if (mode == -1)
-			return null;
-		while (true) 
+		Inode inode = null; 
+ 	    short iNumber = -1;   
+
+        while (true) 
 		{
-			// allocate / retrieve and register the corresponding inode using
-			// dir
-			iNumber = fname.equals("/") ? 0 : dir.namei(fname);
-			
-			if (iNumber < 0) 
-			{ // file does not exist
-				if (mode == FileTableEntry.READONLY) // do not allocate file if
-														// read only
-					return null;
-				// allocate Inode with default constructors
-				if ((iNumber = dir.ialloc(fname)) < 0)
-					return null; // or not
-				iNode = new Inode();
-				break;
-			}
-			
-			iNode = new Inode(iNumber);
-			if (iNode.flag == Inode.DELETE)
-				return null; // no more to open
-			if (iNode.flag == Inode.UNUSED || iNode.flag == Inode.USED)
-				break; // no need to wait for anything
-			// flags left include read and write
-			if (mode == FileTableEntry.READONLY && // mode is "r"
-					iNode.flag == Inode.READ)
-				break; // no need to wait on READ
-			
-			// if the flag is WRITE for "r", or READ or WRITE for "w" "w+" or
-			// "a" we wait in all cases
-			try 
+            // get the inumber form the inode for given file name
+            //iNumber = (fileName.equals("/") ? (short) 0 : dir.namei(fileName));
+			if (fileName.equals("/"))
 			{
-				wait();
-			} 
-			catch (InterruptedException e) {}
-		}
-		// increment this iNode's count
-		iNode.count++;
+				iNumber = (short) 0;			
+			}
+			else
+			{
+				iNumber = dir.namei(fileName);	
+			}
 
-		// immediately write back this iNode to the disk
-		iNode.toDisk(iNumber);
+            
+            if (iNumber >= 0)    // if iNode exists
+			{
+                inode = new Inode(iNumber);  
 
-		// allocate new file table entry for this file name
-		fte = new FileTableEntry(iNode, iNumber, m);
+                if (mode.equals("r"))
+				{
+                    if (inode.flag == READ || inode.flag == USED || inode.flag == UNUSED) 
+					{
+                        inode.flag = READ;   // safe to read
+                        break;                       
+                    } 
+					else if (inode.flag == WRITE) // currently writing
+					{
+                        try {
+                            wait();
+                        } catch (InterruptedException e) { }
+                    }
+                } 
+				else 
+				{
+                    if (inode.flag == USED || inode.flag == UNUSED) 
+					{
+                        inode.flag = WRITE;
+                        break;
+                    } 
+					else 
+					{
+                        try {
+                            wait();
+                        } catch (InterruptedException e) { }
+                    }
+                }
+            } 
+			else if (!mode.equals("r"))   // create new iNode
+			{
+                iNumber = dir.ialloc(fileName);
+                inode = new Inode(iNumber);
+                inode.flag = WRITE;
+                break;
+            } 
+			else 
+			{
+                return null;
+            }
+        }
 
-		// add FTE to table
-		table.add(fte);
-
-		// return a reference to this FTE
-		return fte;
+		// increase count
+        inode.count++;  
+        inode.toDisk(iNumber);
+        
+		// make new FTE
+        FileTableEntry fte = new FileTableEntry(inode, iNumber, mode);
+        table.addElement(fte);
+        return fte;
 	}
 	
 	// ------------------------ ffree -------------------------------------- //
-	// 
+	//  Locate and free an FTE
 	// --------------------------------------------------------------------- //
 	public synchronized boolean ffree(FileTableEntry fte) 
 	{
-		if (fte == null)
-		{
-				return true; // if null, it's already free
-		}
+		Inode inode = new Inode(fte.iNumber);
 
-		Inode iNode = fte.iNode;
-		short iNumber = fte.iNumber;
-
-		// the FTE was not found in my table
-		if (!table.removeElement(fte))
-		{
-				return false;
-		}
-
-		// decrement this iNode's count
-		if (iNode.count > 0)
-		{
-				iNode.count--;
-		}
-
-		// when no more FTEs point to iNode, flag = 0
-		if (iNode.count == 0)
-		{
-			iNode.flag = 0;
-		}
-
-		// save the corresponding iNode to the disk
-		iNode.toDisk(iNumber);
-
-		// notify waiting threads
-		if (iNode.flag == Inode.READ || iNode.flag == Inode.WRITE)
-		{
-				notify();
-		}
-
-		// free this FTE
-		fte = null; // the FTE is now eligible for garbage collection
-
-		// the FTE was found in my table
-		return true;
+        if (table.remove(fte))
+        {
+            if (inode.flag == READ)
+            {
+                if (inode.count == 1)
+                {
+                    // free this file table entry.
+                    notify();
+                    inode.flag = USED;
+                }
+            }
+            else if (inode.flag == WRITE)
+            {
+                inode.flag = USED;
+                notifyAll();
+            }
+			
+            inode.count--;  // lower count
+            inode.toDisk(fte.iNumber); 
+			
+            return true;
+        }
+        return false;
 	}
 
 	// ------------------------ fempty ------------------------------------- //
-	// 
+	//  Return true if empty
 	// --------------------------------------------------------------------- //
 	public synchronized boolean fempty() 
 	{
-		return table.isEmpty(); // return if table is empty
+		return table.isEmpty(); 
 	}
 }

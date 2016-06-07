@@ -13,7 +13,7 @@ public class SuperBlock
 
 
 	// ------------------------ Constructor -------------------------------- //
-	//  Default SuperBlock Constructor Create in format of 64 Inodes
+	//  Default 
 	// --------------------------------------------------------------------- //
 	public SuperBlock() 
 	{
@@ -22,9 +22,10 @@ public class SuperBlock
 
 
 	// ------------------------ Constructor -------------------------------- //
-	// 
+	// Parameter:
+	//   - Total Disk Size
 	// --------------------------------------------------------------------- //
-	public SuperBlock(int diskSize) 
+	public SuperBlock(int sizeOfDisk) 
 	{
 		// allocate superblock
 		byte[] block = new byte[Disk.blockSize];
@@ -35,13 +36,13 @@ public class SuperBlock
 		freeList = SysLib.bytes2int(block, 8);
 
 		// success case
-		if (totalBlocks == diskSize && totalInodes > 0 && freeList >= 2) 
+		if (freeList >= 2 && totalInodes > 0 && totalBlocks == sizeOfDisk) 
 		{
 			return;
 		} 
 		else 
 		{
-			totalBlocks = diskSize;
+			totalBlocks = sizeOfDisk;
 			format(defaultInodeBlocks);
 		}
 	}
@@ -53,43 +54,62 @@ public class SuperBlock
 	// --------------------------------------------------------------------- //
 	public void format(int iNodes) 
 	{
-		byte[] block = null;
-
-		Kernel.report((iNodes == defaultInodeBlocks ? "default " : "")
-				+ "format( " + iNodes + " )");
+		if (iNodes < 0)
+		{
+			iNodes = defaultInodeBlocks;
+		}
 
 		totalInodes = iNodes;
+		//inodeBlocks = totalInodes;
+		Inode dummy = null;
 
-		for (int i = 0; i < totalInodes; i++) 
+		for (int i = 0; i < totalInodes; i++)
 		{
-			// default flag is UNUSED
-			Inode newInode = new Inode();
-			newInode.toDisk((short) i);
+			dummy = new Inode();
+			dummy.flag = 0;
+			dummy.toDisk((short) i);
 		}
 
-		// set the free list depends on the number of Inodes
-		// default 64 free list will points to 4
+		freeList = (totalInodes / 16) + 2;
 
-		freeList = iNodes / 16 + (iNodes % 16 == 0 ? 1 : 2);
+		byte [] newEmpty = null;    // new dummy block
 
-		// create new free blocks and write it into Disk
-		for (int i = totalBlocks - 2; i >= freeList; i--) 
+		for (int i = freeList; i < totalBlocks - 1; i++)
 		{
-			block = new byte[Disk.blockSize];
-			for (int j = 0; j < Disk.blockSize; j++) 
+			newEmpty = new byte [Disk.blockSize];
+
+			//erase
+			for (int j = 0; j < Disk.blockSize; j++)
 			{
-				block[j] = (byte) 0;
+				newEmpty[j] = 0;
 			}
-			SysLib.int2bytes(i + 1, block, 0);
-			SysLib.rawwrite(i, block);
+
+			SysLib.int2bytes(i+1, newEmpty, 0);
+			SysLib.rawwrite(i, newEmpty);
 		}
-		// last block has null pointer
-		SysLib.int2bytes(-1, block, 0);
-		SysLib.rawwrite(totalBlocks - 1, block);
-		// finalized and sync SuperBlock info to Disk
-		// with everything formatted
-		sync();
-	}
+
+		newEmpty = new byte[Disk.blockSize];
+
+		//erase
+		for (int j = 0; j < Disk.blockSize; j++)
+		{
+			newEmpty[j] = 0;
+		}
+
+		SysLib.int2bytes(-1, newEmpty, 0);
+		SysLib.rawwrite(totalBlocks - 1, newEmpty);
+		byte[] newBlock = new byte[Disk.blockSize];
+
+		// copy back all components
+		SysLib.int2bytes(totalBlocks, newBlock, 0);
+		SysLib.int2bytes(totalInodes, newBlock, 4);
+		SysLib.int2bytes(freeList, newBlock, 8);
+
+		// write new super
+		SysLib.rawwrite(0, newBlock);
+
+    }
+	
 
 
 	// ------------------------ sync --------------------------------------- //
@@ -98,11 +118,11 @@ public class SuperBlock
 	// --------------------------------------------------------------------- //
 	public void sync() 
 	{
-		byte[] block = new byte[Disk.blockSize];
-		SysLib.int2bytes(totalBlocks, block, 0);
-		SysLib.int2bytes(totalInodes, block, 4);
-		SysLib.int2bytes(freeList, block, 8);
-		SysLib.rawwrite(0, block);
+		byte[] blockData = new byte[Disk.blockSize];
+		SysLib.int2bytes(freeList, blockData, 8);
+		SysLib.int2bytes(totalBlocks, blockData, 0);
+		SysLib.int2bytes(totalInodes, blockData, 4);
+		SysLib.rawwrite(0, blockData);
 		Kernel.report("Superblock synchronized");
 	}
 
@@ -110,31 +130,21 @@ public class SuperBlock
 	// ------------------------ getFreeBlock ------------------------------- //
 	// Dequeue the top block from the free list
 	// --------------------------------------------------------------------- //
-	public short getFreeBlock() 
+	public int getFreeBlock() 
 	{
-		short freeBlock;
-		byte[] block;
-
-		// return -1 if there are no more free blocks
 		if (freeList < 0 || freeList > totalBlocks)
 		{
-				return -1;
+			return -1;   // block error
 		}
-		
-		// free block is given from free list
-		freeBlock = (short) freeList;
-		// create new empty block
-		block = new byte[Disk.blockSize];
-		// get the content of the freeList block
-		// wipe out the to block from the freeList
-		// with an empty block
-		SysLib.rawread(freeList, block);
-		SysLib.int2bytes(0, block, 0);
-		SysLib.rawwrite(freeList, block);
+		else
+		{
+			int block = freeList;
+			byte[] blockData = new byte[Disk.blockSize];
+			SysLib.rawread(freeList, blockData);
 
-		// free list becomes free block
-		freeList = SysLib.bytes2int(block, 0);
-		return freeBlock;
+			freeList = SysLib.bytes2int(blockData, 0);
+			return block;   // return locale of free block
+		}
 	}
 
 
@@ -144,22 +154,46 @@ public class SuperBlock
 	// --------------------------------------------------------------------- //
 	public boolean returnBlock(int blockNumber) 
 	{
-		byte[] block;
-		// blockNumber cannot be superblock or out of range
 		if (blockNumber < 0 || blockNumber > totalBlocks)
 		{
-				return false;
+			int temp = 0;
+			int freeBlock = freeList;
+
+			byte [] next = new byte[Disk.blockSize];
+
+			byte [] newBlock = new byte[Disk.blockSize];
+
+
+			//erase block
+			for(int i = 0; i < Disk.blockSize; i++)
+			{
+				newBlock[i] = 0;
+			}
+
+			SysLib.int2bytes(-1, newBlock, 0);
+
+			while (freeBlock != -1)
+			{
+				SysLib.rawread(freeBlock, next);
+
+				temp = SysLib.bytes2int(next, 0);
+
+				if (temp == -1)
+				{
+					
+					SysLib.int2bytes(blockNumber, next, 0);
+					SysLib.rawwrite(freeBlock, next);
+					SysLib.rawwrite(blockNumber, newBlock);
+
+					return true;   
+				}
+
+				freeBlock = temp;
+			}
 		}
-			
-		block = new byte[Disk.blockSize];
-		// translate the new block to the end of
-		// the freeList
-		SysLib.int2bytes(freeList, block, 0);
-		// write the content of the given block
-		// to the new block
-		SysLib.rawwrite(blockNumber, block);
-		// set the next freeList to the given block
-		freeList = blockNumber;
-		return true;
+	    // Invalid block 
+		return false;   
 	}
 }
+
+

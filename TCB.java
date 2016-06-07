@@ -9,7 +9,7 @@ public class TCB
 	private Thread thread = null;
 	private int tid = 0;
 	private int pid = 0;
-	private boolean terminated = false;
+	private boolean terminate = false;
 	private int sleepTime = 0;
 
 	// User file descriptor table
@@ -25,7 +25,7 @@ public class TCB
 		thread = newThread;
 		tid = myTid;
 		pid = parentTid;
-		terminated = false;
+		terminate = false;
 
 		ftEnt = new FileTableEntry[32];
 
@@ -54,11 +54,11 @@ public class TCB
 	}
 	public synchronized boolean setTerminated() 
 	{
-		return (terminated = true);
+		return (terminate = true);
 	}
 	public synchronized boolean getTerminated() 
 	{
-		return terminated;
+		return terminate;
 	}
 
 	// ------------------------ getFd -------------------------------------- //
@@ -79,7 +79,6 @@ public class TCB
 				return i;
 			}
 		}
-		
 		return -1;
 	}
 
@@ -94,17 +93,16 @@ public class TCB
 			return null;
 		}
 		// if found, return the FTE and set pointer to null
-		FileTableEntry oldEnt = ftEnt[fd];
+		FileTableEntry oldFTE = ftEnt[fd];
 		ftEnt[fd] = null;
-		return oldEnt;
+		return oldFTE;
 	}
 	
 	// ------------------------ getFte ------------------------------------- //
-	// 
+	//  Return an FTE
 	// --------------------------------------------------------------------- //
 	public synchronized FileTableEntry getFte(int fd) 
 	{
-		// get the FTE
 		return fd >= 3 && fd < 32 ? ftEnt[fd] : null;
 	}
 }
